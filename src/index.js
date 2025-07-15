@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { nameToIdMap } from "./data/nameToIdsMap.js"
 import { ticketStatusToIdMap } from "./data/ticketStatusToIdMap.js"
-import { zendeskConfig } from "./config.js"
+import { zendeskConfig, authConfig } from "./config.js"
 
 var zendesk = require('node-zendesk');
 
@@ -12,6 +12,28 @@ var client = zendesk.createClient({
   token:     zendeskConfig.token,
   subdomain: zendeskConfig.subdomain
 });
+
+// Authorization middleware
+function checkAuth(request) {
+  if (!authConfig.requireAuth) return true;
+
+  // Accept token as query param for compatibility
+  const url = new URL(request.url);
+  if (url.searchParams.get('auth_token') === authConfig.token) return true;
+
+  // Check Authorization header
+  const authHeader = request.headers.get('Authorization');
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.substring(7);
+    return token === authConfig.token;
+  }
+
+  // Check X-API-Key header
+  const apiKey = request.headers.get('X-API-Key');
+  if (apiKey === authConfig.token) return true;
+
+  return false;
+}
 
 // TODO: 
 // Implement auth
@@ -47,16 +69,6 @@ export class MyMCP extends McpAgent {
 	});
 
 	async init() {
-		this.server.tool(
-			"calculate-bmi",
-			{ weightKg: z.number(), heightM: z.number() },
-			async ({ weightKg, heightM }) => ({
-				content: [{
-					type: "text",
-					text: String(weightKg / (heightM * heightM))
-				}]
-			})
-		);
 
 		this.server.tool(
 			"get_ticket_fields_by_id",
@@ -272,6 +284,28 @@ export class MyMCP extends McpAgent {
 export default {
 	fetch(request, env, ctx) {
 		const url = new URL(request.url);
+
+		// Health check endpoint (no auth required)
+		if (url.pathname === "/health") {
+			return new Response(JSON.stringify({ 
+				status: "healthy", 
+				service: "Zendesk MCP Server",
+				version: "1.0.0"
+			}), { 
+				status: 200,
+				headers: { 'Content-Type': 'application/json' }
+			});
+		}
+
+		// Check authorization for all other endpoints
+		if (!checkAuth(request)) {
+			return new Response("Unauthorized", { 
+				status: 401,
+				headers: {
+					'WWW-Authenticate': 'Bearer realm="Zendesk MCP Server"'
+				}
+			});
+		}
 
 		if (url.pathname === "/sse" || url.pathname === "/sse/message") {
 			return MyMCP.serveSSE("/sse").fetch(request, env, ctx);
